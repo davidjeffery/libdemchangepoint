@@ -1,3 +1,5 @@
+For blog: https://davidjeffery.substack.com/p/libdem-byelection-boost
+
 library("tidyverse")
 library("rvest")
 # remotes::install_github("decisionpatterns/stringr.tools")
