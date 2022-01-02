@@ -1,0 +1,250 @@
+library("tidyverse")
+library("rvest")
+# remotes::install_github("decisionpatterns/stringr.tools")
+library("stringr.tools")
+library("fastDummies")
+library("ggfortify")
+library("changepoint")
+library("sarbcurrent")
+library("strucchange")
+
+# Reading in the table from Wikipedia
+page <- rvest::read_html("https://en.wikipedia.org/wiki/Opinion_polling_for_the_next_United_Kingdom_general_election")
+
+# Obtain all pieces of the web page which corresponds to the "wikitable" node
+my.tables <- html_elements(page, ".wikitable")
+# Convert the html table element into a data frame
+my.table.2022 <- html_table(my.tables[[1]], fill = TRUE)
+my.table.2021 <- html_table(my.tables[[2]], fill = TRUE)
+my.table.2020 <- html_table(my.tables[[3]], fill = TRUE)
+
+# Extracting and tidying a single column from the table and adding row names
+
+my.table.2022.2 <- my.table.2022 |> 
+  slice(-1) |> 
+  select(-Client) |> 
+  # rownames_to_column() |> 
+  mutate(Datesconducted = str_replace(Datesconducted, "–.* ", "_"),
+         Datesconducted = str_replace(Datesconducted, " _.*", ""),
+         Datesconducted = str_replace(Datesconducted, "_", " "),
+         Datesconducted = str_suffix(Datesconducted, " 2022"),
+         Datesconducted = lubridate::dmy(Datesconducted),
+         comment = case_when(
+           Area != "GB" & Area != "UK" ~ Pollster
+         )
+         ) 
+
+my.table.2021.2 <- my.table.2021 |> 
+  slice(-1) |> 
+  select(-Client) |> 
+  # rownames_to_column() |> 
+  mutate(Datesconducted = str_replace(Datesconducted, "–.* ", "_"),
+         Datesconducted = str_replace(Datesconducted, " _.*", ""),
+         Datesconducted = str_replace(Datesconducted, "_", " "),
+         Datesconducted = str_suffix(Datesconducted, " 2021"),
+         Datesconducted = lubridate::dmy(Datesconducted),
+         comment = case_when(
+           Area != "GB" & Area != "UK" ~ Pollster
+         )
+  ) 
+
+my.table.2020.2 <- my.table.2020 |> 
+  slice(-1) |> 
+  select(-Client) |> 
+  filter(Pollster != "2019 general election") |> 
+  # rownames_to_column() |> 
+  mutate(Datesconducted = str_replace(Datesconducted, "–.* ", "_"),
+         Datesconducted = str_replace(Datesconducted, " _.*", ""),
+         Datesconducted = str_replace(Datesconducted, "_", " "),
+         Datesconducted = str_suffix(Datesconducted, " 2020"),
+         Datesconducted = lubridate::dmy(Datesconducted),
+         comment = case_when(
+           Area != "GB" & Area != "UK" ~ Pollster
+         )
+  ) |> 
+  rename(Reform = "Brexit")
+
+all_polls <- rbind(my.table.2022.2, my.table.2021.2, my.table.2020.2) |> 
+  arrange(Datesconducted) |> 
+  rownames_to_column()
+  
+
+dummy_cols <- dummy_cols(all_polls$comment) |> 
+              rownames_to_column()|> 
+              mutate(across(tidyselect::starts_with(".data_"),  ~na_if(., "0"))) |> 
+              fill(tidyselect::starts_with(".data_"), .direction = "down") |> 
+              mutate(across(tidyselect::starts_with(".data_"),  ~replace_na(., "0"))) |> 
+  select(rowname, contains("Chesham"), contains("North Shrop")) |> 
+  rename_all(funs(stringr::str_replace_all(., '.data', 'by'))) |> 
+  rename_all(funs(stringr::str_replace_all(., ' by-election.*', ''))) |> 
+  rename_all(funs(stringr::str_replace_all(., ' ', '')))
+
+            
+polling <- all_polls |> 
+  left_join(dummy_cols, by = "rowname") |> 
+  filter(Area == "GB") |> 
+  mutate(Samplesize = str_replace(Samplesize, ",", ""),
+         Samplesize = as.numeric(Samplesize),
+         Con = str_replace(Con, "%", ""),
+         Con = as.numeric(Con),
+         Lab = str_replace(Lab, "%", ""),
+         Lab = as.numeric(Lab),
+         `Lib Dem` = str_replace(`Lib Dem`, "%", ""),
+         `Lib Dem` = as.numeric(`Lib Dem`),
+         Green = str_replace(Green, "%", ""),
+         Green = as.numeric(Green)) |> 
+  select(-rowname, -Area, -SNP, -Reform, -Others, -Lead, -comment) |> 
+  rename("LibDem" = "Lib Dem") |> 
+  mutate(by_status = case_when(
+    by_CheshamandAmersham == 0 & by_NorthShropshire == 0 ~ 0,
+    by_CheshamandAmersham == 1 & by_NorthShropshire == 0 ~ 1,
+    by_CheshamandAmersham == 1 & by_NorthShropshire == 1 ~ 2 
+  )) |> 
+  filter(Samplesize != "24373")
+
+party_colours <-c(
+  "Con" = "#0087DC",
+  "Lab" = "#E4003B",
+  "LibDem" = "#FAA61A",
+  "Green" = "#6AB023"
+)
+
+polling_long <- polling |> 
+  pivot_longer(cols = c("Con", "Lab", "LibDem", "Green"),
+               names_to = "party",
+               values_to = "polling")
+  
+
+facet_labels <- c("Pre-Chesham", "Post-Chesham", "Post-North Shrop.")
+names(facet_labels) <- c("0", "1", "2")
+
+
+hospital_names <- c(
+  'Pre-Chesham' = "0",
+  'Post-Chesham' = "1",
+  'Post-North Shrop.' = "2"
+)
+
+ggplot(polling_long |> 
+         filter(party == "LibDem")) +
+  geom_point(aes(x= Datesconducted, y = polling, colour = party)) +
+  geom_smooth(aes(x= Datesconducted, y = polling, colour = party),
+              method = 'glm') +
+  scale_colour_manual(values = party_colours) +
+  scale_x_date(date_labels = "%x") + 
+  scale_y_continuous(limits = c(0, 20)) +
+  facet_wrap(~by_status, 
+             scales = "free_x",
+             labeller = labeller(by_status = facet_labels)) +
+  labs(title="Liberal Democrat polling since 2019 general election",
+       subtitle = "Each facet is of varying length",
+       x ="Date Conducted", y = "% support") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))
+
+# Average table
+
+a <- polling_long |> 
+  group_by(by_status, party) |> 
+  summarise(polling = mean(polling)) 
+
+
+
+# Structural Change
+# install.packages("timetk")
+library(timetk)
+
+lib_dem <- polling_long |> 
+  filter(party == "LibDem") |> 
+  select(Datesconducted, polling, by_status)
+
+
+plot_time_series(lib_dem, 
+                 .date_var = Datesconducted,
+                 .value = polling,
+                 .color_var=by_status)
+
+                 
+polling_long %>%
+  group_by(party) %>%
+  plot_anomaly_diagnostics(Datesconducted, polling, .facet_ncol = 2)
+
+
+
+
+
+# https://kevin-kotze.gitlab.io/tsm/ts-2-tut/
+
+ld <- polling_long |> 
+  filter(party == "LibDem") |> 
+  rowid_to_column()
+
+plot.ts(ld)
+
+as.vector(ld)
+
+m_binseg <- cpt.mean(ld$polling, 
+                     penalty = "BIC", method = "BinSeg", Q = 10)
+
+plot(m_binseg, type = "l", xlab = "Index", cpt.width = 4)
+cpts(m_binseg)
+
+cng_pts <- as.data.frame(m_binseg@cpts) |> 
+  mutate(id = cur_group_rows()) |> 
+  # group_by(id) %>%
+  mutate(diff = m_binseg@cpts - lag(m_binseg@cpts, default = 0),
+         value = m_binseg@cpts - diff)
+
+cng_av <- as.data.frame(m_binseg@param.est) |> 
+  mutate(id = cur_group_rows())
+  
+test <- ld |> 
+  left_join(cng_pts, by = c("rowid" = "m_binseg@cpts")) |> 
+  left_join(cng_av, by = c("id" = "id")) |> 
+  # mutate(id = na_if(id, "0")) 
+  fill(id, .direction = "up") |> 
+  fill(mean, .direction = "up") |> 
+  fill(diff, .direction = "up") |> 
+  fill(value, .direction = "up")
+  
+
+ld_plot <-autoplot(cpt.mean(ld$polling, 
+                    penalty = "BIC", method = "BinSeg", Q = 10),
+         cpt.colour = 'blue', cpt.linetype = 'solid')
+
+labels <- data.frame (event  = c("2019 GE", "Starmer becomes leader", "Davey becomes leader", "C+A BE", "NS BE"),
+                  second_column = c(0, 20, 85, 202, 297)
+)
+
+ld_plot +
+  geom_segment(data = test, 
+               aes(x = value, xend = value+diff, y = mean, yend = mean), colour = "red") +
+  geom_vline(xintercept = 0, linetype="dotdash", colour = "red") +
+  geom_vline(xintercept = 20, linetype="dotdash", colour = "red") +
+  geom_vline(xintercept = 85, linetype="dotdash", colour = "red") +
+  geom_vline(xintercept = 202, linetype="dotdash", colour = "red") +
+  geom_vline(xintercept = 297, linetype="dotdash", colour = "red") +
+  geom_label(data = labels, 
+            aes(label = event, x = second_column, y = 14),
+            nudge_x = 0.25, 
+            check_overlap = T) +
+  labs(title="Liberal Democrat polling since 2019 general election",
+        x ="Poll #", y = "% support")
+  
+
+
+  
+# 
+# 
+# grn <- polling_long |> 
+#   filter(party == "Green") |> 
+#   select(polling)
+# 
+# plot.ts(grn)
+# 
+# m_binseg <- cpt.mean(grn$polling, 
+#                      penalty = "BIC", method = "BinSeg", Q = 6)
+# 
+# plot(m_binseg, type = "l", xlab = "Index", cpt.width = 4)
+# cpts(m_binseg)
+# 
